@@ -37,6 +37,9 @@ class SamsungExport:
 
     root: Path
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", Path(self.root))
+
     @classmethod
     def locate(cls, path: Path | str) -> "SamsungExport":
         """Accept the export folder itself or a folder that contains exactly one export folder."""
