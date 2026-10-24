@@ -58,19 +58,59 @@ samsung_health_extractor/
 
 ```bash
 # Run with default settings
-uv run samsung-health-extract
-
-# Or run directly with Python
-uv run python samsung_health_extractor.py
+uv run samsung-health extract
 
 # Specify a custom data path
-uv run samsung-health-extract "./path/to/Samsung Health"
+uv run samsung-health extract "./path/to/Samsung Health"
 
 # Specify a custom log file
-uv run samsung-health-extract --log-file "./my-log.log"
+uv run samsung-health extract --log-file "./my-log.log"
 ```
 
+`samsung-health-extract` is kept as an alias of `samsung-health`, so `uv run samsung-health-extract extract` works too.
+
 Logs are automatically saved to the `logs/` directory with timestamps (e.g., `logs/samsung_health_extract_20241015_143022.log`). Each log file contains detailed structured logging in JSON format for easy parsing and debugging.
+
+## Wearable tracks for glucose data
+
+The `samsung_health` package reads an export into tidy tables and turns them into columns on any timeline,
+typically a continuous glucose monitor (CGM) track on a five-minute grid. Three commands:
+
+```bash
+# One parquet per stream: heart rate, step bins, sleep sessions and stages, exercise sessions, period days
+uv run samsung-health streams "./Samsung Health" ./streams
+
+# Add the wearable columns to a CGM file (parquet or CSV) whose timestamp column is naive local time
+uv run samsung-health align "./Samsung Health" cgm.parquet cgm_with_wearables.parquet --time-column date
+
+# The wearable columns alone on a regular five-minute grid
+uv run samsung-health grid "./Samsung Health" wearables_5min.parquet --start 2024-01-01T00:00 --end 2024-12-31T23:55
+```
+
+`align` keeps every original column and, for a CSV, every original cell and line ending; it fills the
+columns it adds where the file already has them empty and refuses to overwrite data unless given
+`--overwrite`. Every value at a row with time `t` is built from what was complete by `t`, so a forecaster
+that reads a history ending at a row sees nothing after it:
+
+| Column | What it holds at a row with time `t` |
+|---|---|
+| `heartrate` | mean heart rate (bpm) of the readings in the ten minutes up to `t`; the watch spot-reads every ten minutes by default |
+| `steps` | steps per five minutes over the most recent finished ten-minute step block of Samsung's all-device merge (it lags by up to ten minutes); 0 where the day was recorded and nobody walked, null where the day has no record |
+| `calories_burned` | the active kilocalories Samsung attributes to those steps, per five minutes |
+| `workout_label`, `workout_duration` | at the row whose five minutes contain a workout's start: its name and active minutes, one row per workout. The duration is known only when the workout ends, so it is the one column that is not past-only |
+| `exercise_label`, `exercise_minutes` | the exercise under way during the five minutes up to `t`, and how many of those minutes it covered |
+| `sleep_stage` | `awake`, `light`, `deep`, `rem`, or `unstaged` inside a sleep without stages, at the middle of the five minutes; null outside sleep |
+| `asleep` | 1 inside a sleep and not awake, 0 otherwise; null for a night (noon to noon) with no sleep of three hours or more, because a night without the watch is unknown rather than awake |
+| `menstruation`, `cycle_day`, `cycle_phase` | a logged period day; days since the latest period began; and the phase (`menstrual`, `follicular`, `ovulatory`, `luteal`) estimated only from periods that have already begun |
+
+The column names `heartrate`, `steps`, `calories_burned`, `workout_label` and `workout_duration` are the
+ones the MetaboNet diabetes dataset uses, so a file in its schema gets those columns filled in place.
+
+Three properties of the export break naive readers, and `samsung_health.export.SamsungExport` handles
+each: every CSV opens with a metadata line before its header; every row ends with a trailing comma; and
+stream names are prefixes of each other (`com.samsung.shealth.exercise` and
+`com.samsung.shealth.exercise.weather`), so a glob on the stream name opens the wrong file. Stored times are
+UTC, and each record's `time_offset` gives the local wall clock, which is what CGM exports record.
 
 ## Configuration
 
@@ -169,6 +209,14 @@ cat logs/samsung_health_extract_*.log | jq 'select(.message_type | startswith("f
 ```
 
 ## Development
+
+### Tests
+
+```bash
+uv run pytest -q
+```
+
+The tests build a small synthetic export in the export's own file conventions, so they need no real data.
 
 ### Type Checking
 
