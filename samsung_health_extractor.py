@@ -1034,12 +1034,12 @@ def extract_data(samsung_data_path: Path = Path("./Samsung Health")) -> None:
             action.log(message_type="overall_stats", total_categories=len(categories), total_files=total_files)
 
 
-@app.command()
+@app.command("extract")
 def main(
-    samsung_data_path: str = "./Samsung Health",
-    log_file: str | None = None,
+    samsung_data_path: str = typer.Argument("./Samsung Health", help="Folder holding the unpacked export folder"),
+    log_file: str | None = typer.Option(None, help="Log file (default: logs/samsung_health_extract_<time>.log)"),
 ) -> None:
-    """Extract and process Samsung Health data exports.
+    """Combine CSVs as configured in data_combination.json (the original, config-driven extraction).
     
     Args:
         samsung_data_path: Path to the Samsung Health data directory (default: ./Samsung Health)
@@ -1069,6 +1069,77 @@ def main(
     finally:
         # Close log file
         log_handle.close()
+
+
+@app.command("streams")
+def streams_command(
+    export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),
+    out_dir: Path = typer.Argument(..., help="Where to write one parquet per stream"),
+) -> None:
+    """Write each parsed stream (heart rate, step bins, sleep, exercise, period days) to parquet, in local time."""
+    from samsung_health import SamsungExport, Streams
+
+    data = Streams.read(SamsungExport.locate(export_path))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, frame in vars(data).items():
+        frame.write_parquet(out_dir / f"{name}.parquet")
+        span = ""
+        time = next((c for c in ("available", "start", "date") if c in frame.columns), None)
+        if time and frame.height:
+            span = f"  {frame[time].min()} .. {frame[time].max()}"
+        typer.echo(f"{name:20s} {frame.height:>9,d} rows{span}")
+
+
+@app.command("align")
+def align_command(
+    export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),
+    source: Path = typer.Argument(..., help="A parquet or CSV with a naive local timestamp column (a CGM track)"),
+    output: Path = typer.Argument(..., help="Where to write it with the wearable columns (.parquet or .csv)"),
+    time_column: str = typer.Option("date", help="The timestamp column of SOURCE"),
+    overwrite: bool = typer.Option(False, help="Replace wearable columns that already hold data"),
+) -> None:
+    """Add past-only wearable columns (heart rate, steps, exercise, sleep, menstrual cycle) to a timeline."""
+    from samsung_health import SamsungExport, Streams, add_wearables
+
+    frame = pl.read_parquet(source) if source.suffix == ".parquet" else pl.read_csv(source, try_parse_dates=True)
+    if frame.schema[time_column] == pl.String:
+        frame = frame.with_columns(pl.col(time_column).str.to_datetime(strict=False))
+    joined = add_wearables(frame, time_column, Streams.read(SamsungExport.locate(export_path)), overwrite)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.suffix == ".parquet":
+        joined.write_parquet(output, statistics=True)
+    else:
+        joined.write_csv(output)
+    typer.echo(f"{output}: {joined.height:,d} rows")
+    _coverage(joined)
+
+
+@app.command("grid")
+def grid_command(
+    export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),
+    output: Path = typer.Argument(..., help="Where to write the five-minute track (.parquet or .csv)"),
+    start: str = typer.Option(..., help="First timestamp, local, e.g. 2024-04-11T00:00"),
+    end: str = typer.Option(..., help="Last timestamp, local"),
+) -> None:
+    """The wearable columns alone on a regular five-minute grid of local time."""
+    from samsung_health import SamsungExport, Streams, wearable_columns
+
+    times = pl.datetime_range(datetime.fromisoformat(start), datetime.fromisoformat(end), "5m",
+                              time_unit="us", eager=True).alias("date")
+    frame = pl.concat([times.to_frame(), wearable_columns(times, Streams.read(SamsungExport.locate(export_path)))],
+                      how="horizontal")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(output, statistics=True) if output.suffix == ".parquet" else frame.write_csv(output)
+    typer.echo(f"{output}: {frame.height:,d} rows")
+    _coverage(frame)
+
+
+def _coverage(frame: pl.DataFrame) -> None:
+    from samsung_health import COLUMNS
+
+    for name in COLUMNS:
+        filled = frame.height - frame[name].null_count()
+        typer.echo(f"  {name:18s} {filled:>9,d} rows filled ({100 * filled / max(frame.height, 1):5.1f} %)")
 
 
 if __name__ == "__main__":

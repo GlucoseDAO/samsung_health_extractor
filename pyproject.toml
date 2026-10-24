@@ -6,20 +6,29 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "polars>=1.17.0",
+    "numpy>=1.26",
     "typer>=0.15.0",
     "eliot>=1.15.0",
 ]
 
 [project.scripts]
-samsung-health-extract = "samsung_health_extractor:main"
+samsung-health = "samsung_health_extractor:app"
+samsung-health-extract = "samsung_health_extractor:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[tool.hatch.build.targets.wheel]
+packages = ["samsung_health"]
+only-include = ["samsung_health", "samsung_health_extractor.py"]
+
+[dependency-groups]
+dev = [
     "pytest>=8.0.0",
     "mypy>=1.8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
