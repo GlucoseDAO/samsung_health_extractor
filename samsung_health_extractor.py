@@ -1101,15 +1101,15 @@ def align_command(
     """Add past-only wearable columns (heart rate, steps, exercise, sleep, menstrual cycle) to a timeline."""
     from samsung_health import SamsungExport, Streams, add_wearables
 
-    frame = pl.read_parquet(source) if source.suffix == ".parquet" else pl.read_csv(source, try_parse_dates=True)
-    if frame.schema[time_column] == pl.String:
-        frame = frame.with_columns(pl.col(time_column).str.to_datetime(strict=False))
+    # A CSV is read as text, so every original cell is written back exactly as it was.
+    frame = pl.read_parquet(source) if source.suffix == ".parquet" else pl.read_csv(source, infer_schema_length=0)
     joined = add_wearables(frame, time_column, Streams.read(SamsungExport.locate(export_path)), overwrite)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.suffix == ".parquet":
         joined.write_parquet(output, statistics=True)
     else:
-        joined.write_csv(output)
+        crlf = source.suffix != ".parquet" and source.read_bytes()[:65536].split(b"\n", 1)[0].endswith(b"\r")
+        joined.write_csv(output, line_terminator="\r\n" if crlf else "\n")
     typer.echo(f"{output}: {joined.height:,d} rows")
     _coverage(joined)
 

@@ -303,9 +303,13 @@ def add_wearables(frame: pl.DataFrame, time_column: str, data: Streams, overwrit
     """``frame`` with the wearable columns filled in place where it has them, appended where it does not.
 
     A column the frame already holds must be empty (all null), as MetaboNet's wearable columns are for a
-    person whose study recorded none, unless ``overwrite`` is set.
+    person whose study recorded none, unless ``overwrite`` is set. A string time column (a CSV read
+    without type inference) is parsed for the alignment and left as it was in the output.
     """
-    block = wearable_columns(frame[time_column], data)
+    times = frame[time_column]
+    if times.dtype == pl.String:
+        times = times.str.to_datetime(strict=False)
+    block = wearable_columns(times, data)
     for name in block.columns:
         if name in frame.columns and frame[name].null_count() < frame.height and not overwrite:
             raise ValueError(f"column {name!r} already holds data; pass overwrite=True to replace it")
