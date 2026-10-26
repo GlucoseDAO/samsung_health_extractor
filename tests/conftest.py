@@ -70,13 +70,18 @@ def export_dir(tmp_path: Path) -> Path:
     write_json(root, trend, "all.binning_data.json", bins)
     write_json(root, trend, "phone.binning_data.json", [{"count": 500, "calorie": 9.0} for _ in range(144)])
 
-    # Exercise: a 20-minute walk from 10:02 local; a weather file whose name extends the stream's.
+    # Exercise: a 20-minute walk from 10:02 local whose live data holds a heart rate every second, 150 from
+    # 10:05 to 10:15 and 110 from 10:15 to 10:22; a weather file whose name extends the stream's.
     ex = "com.samsung.shealth.exercise"
     write_csv(root, ex, ["start_time", "end_time", "exercise_type", "duration", "calorie", "mean_heart_rate",
-                         "max_heart_rate", "distance", "time_offset", "datauuid"], [
+                         "max_heart_rate", "distance", "live_data", "time_offset", "datauuid"], [
         [_fmt(utc(datetime(2026, 7, 1, 10, 2))), _fmt(utc(datetime(2026, 7, 1, 10, 22))), 1001, 1_200_000, 80.0,
-         95.0, 110.0, 1500.0, OFFSET, "w"],
+         95.0, 110.0, 1500.0, "w.live_data.json", OFFSET, "w"],
     ], prefix="com.samsung.health.exercise.")
+    samples = [{"start_time": _ms(utc(datetime(2026, 7, 1, 10, 5) + timedelta(seconds=k))), "speed": 1.0,
+                "heart_rate": 150.0 if k < 600 else 110.0} for k in range(1020)]
+    samples.append({"start_time": _ms(utc(datetime(2026, 7, 1, 10, 3))), "speed": 1.0})  # no heart rate
+    write_json(root, ex, "w.live_data.json", samples)
     write_csv(root, f"{ex}.weather", ["start_time", "temperature"], [[_fmt(datetime(2026, 7, 1)), 20.0]])
 
     # Sleep: the night of 1 to 2 July, 23:00 to 07:00 local, with a deep stage 02:00-03:00 and an awake

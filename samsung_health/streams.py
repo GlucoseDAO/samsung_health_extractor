@@ -39,11 +39,16 @@ LOCAL = pl.Datetime("us")
 def heart_rate(export: SamsungExport) -> pl.DataFrame:
     """Every heart-rate reading: ``available`` (local), ``heart_rate``, ``heart_rate_min``, ``heart_rate_max``, ``kind``.
 
-    The watch writes two kinds of record. A spot reading (one value, start equal to end; by default every
-    ten minutes) is available at its own time. A record with ``binning_data`` holds a JSON list of
-    one-minute bins (continuous measurement, during exercise or when set so), each available at the end
-    of its minute; its own summary value is dropped so the minutes are not counted twice. Duplicate
-    readings, the same value at the same moment, are kept once.
+    The general heart-rate stream holds two kinds of record. A spot reading (one value, start equal to end;
+    by default every ten minutes) is available at its own time. A record with ``binning_data`` holds a JSON
+    list of one-minute bins (continuous measurement, mostly during sleep), each available at the end of its
+    minute; its own summary value is dropped so the minutes are not counted twice. Duplicate readings, the
+    same value at the same moment, are kept once.
+
+    That stream holds almost nothing during a workout: Samsung keeps workout heart rate, about one sample a
+    second, in each workout's own ``live_data`` file instead. Those samples are always added, as one-minute
+    bins (:func:`workout_heart_rate`), so the readings cover exercise as well as rest: a heart rate read
+    without them held 1 to 2 per cent of one user's workout minutes and almost none of her hard effort.
     """
     raw = export.read(HEART_RATE)
     empty = pl.DataFrame(schema={"available": LOCAL, "heart_rate": pl.Float64, "heart_rate_min": pl.Float64,
@@ -80,10 +85,45 @@ def heart_rate(export: SamsungExport) -> pl.DataFrame:
             "heart_rate", "heart_rate_min", "heart_rate_max", pl.lit("minute").alias("kind"),
         )
     low, high = HEART_RATE_RANGE
-    return (pl.concat([spots.cast(empty.schema), binned.cast(empty.schema)])
+    parts = [spots.cast(empty.schema), binned.cast(empty.schema), workout_heart_rate(export).cast(empty.schema)]
+    return (pl.concat(parts)
             .filter(pl.col("heart_rate").is_between(low, high))
             .unique(subset=["available", "heart_rate"], keep="first", maintain_order=True)
             .sort("available"))
+
+
+def workout_heart_rate(export: SamsungExport) -> pl.DataFrame:
+    """Heart rate recorded inside workouts, as one-minute bins: ``available``, ``heart_rate``, min, max, ``kind``.
+
+    Each exercise row names a ``live_data`` payload: samples about a second apart, each with an epoch
+    ``start_time`` in milliseconds and, when the watch measured it, a ``heart_rate``. The samples of one minute
+    are averaged into a bin available at the end of that minute, in the workout's own local time; a workout
+    whose payload carries no heart rate adds nothing.
+    """
+    schema = {"available": LOCAL, "heart_rate": pl.Float64, "heart_rate_min": pl.Float64,
+              "heart_rate_max": pl.Float64, "kind": pl.String}
+    raw = export.read(EXERCISE)
+    if raw.is_empty() or "live_data" not in raw.columns:
+        return pl.DataFrame(schema=schema)
+    raw = raw.filter(pl.col("live_data").is_not_null()).with_columns(offset_minutes().alias("offset_min"))
+    samples: list[tuple[int, int, float]] = []
+    for name, offset in raw.select("live_data", "offset_min").iter_rows():
+        for row in export.read_json(EXERCISE, name) or []:
+            hr, start = row.get("heart_rate"), row.get("start_time")
+            if hr is None or start is None or not hr:
+                continue
+            samples.append((int(start), int(offset or 0), float(hr)))
+    if not samples:
+        return pl.DataFrame(schema=schema)
+    frame = pl.DataFrame(samples, schema={"ms": pl.Int64, "offset": pl.Int64, "hr": pl.Float64}, orient="row")
+    return (frame.with_columns(((pl.col("ms") // 60_000) * 60_000 + 60_000).alias("end_ms"))
+            .group_by("end_ms", "offset")
+            .agg(pl.col("hr").mean().alias("heart_rate"), pl.col("hr").min().alias("heart_rate_min"),
+                 pl.col("hr").max().alias("heart_rate_max"))
+            .select((pl.from_epoch("end_ms", time_unit="ms").cast(LOCAL) + pl.duration(minutes=pl.col("offset")))
+                    .alias("available"), "heart_rate", "heart_rate_min", "heart_rate_max",
+                    pl.lit("workout").alias("kind"))
+            .cast(schema).sort("available"))
 
 
 def step_bins(export: SamsungExport, source_type: int = ALL_DEVICES) -> pl.DataFrame:

@@ -80,8 +80,10 @@ typically a continuous glucose monitor (CGM) track on a five-minute grid. Three 
 # One parquet per stream: heart rate, step bins, sleep sessions and stages, exercise sessions, period days
 uv run samsung-health streams "./Samsung Health" ./streams
 
-# Add the wearable columns to a CGM file (parquet or CSV) whose timestamp column is naive local time
-uv run samsung-health align "./Samsung Health" cgm.parquet cgm_with_wearables.parquet --time-column date
+# Add the wearable columns to a CGM file (parquet or CSV) whose timestamp column is naive local time;
+# --resting-hr and --max-hr (both or neither) add the person's heart-rate zone and minutes of hard effort
+uv run samsung-health align "./Samsung Health" cgm.parquet cgm_with_wearables.parquet --time-column date \
+    --resting-hr 62 --max-hr 185
 
 # The wearable columns alone on a regular five-minute grid
 uv run samsung-health grid "./Samsung Health" wearables_5min.parquet --start 2024-01-01T00:00 --end 2024-12-31T23:55
@@ -94,7 +96,7 @@ that reads a history ending at a row sees nothing after it:
 
 | Column | What it holds at a row with time `t` |
 |---|---|
-| `heartrate` | mean heart rate (bpm) of the readings in the ten minutes up to `t`; the watch spot-reads every ten minutes by default |
+| `heartrate` | mean heart rate (bpm) of the readings in the ten minutes up to `t`: the general stream's spot readings (every ten minutes by default) and minute bins, and always the workouts' own heart rate, about one sample a second, which Samsung keeps in each workout's file rather than in the general stream |
 | `steps` | steps per five minutes over the most recent finished ten-minute step block of Samsung's all-device merge (it lags by up to ten minutes); 0 where the day was recorded and nobody walked, null where the day has no record |
 | `calories_burned` | the active kilocalories Samsung attributes to those steps, per five minutes |
 | `workout_label`, `workout_duration` | at the row whose five minutes contain a workout's start: its name and active minutes, one row per workout. The duration is known only when the workout ends, so it is the one column that is not past-only |
@@ -102,6 +104,8 @@ that reads a history ending at a row sees nothing after it:
 | `sleep_stage` | `awake`, `light`, `deep`, `rem`, or `unstaged` inside a sleep without stages, at the middle of the five minutes; null outside sleep |
 | `asleep` | 1 inside a sleep and not awake, 0 otherwise; null for a night (noon to noon) with no sleep of three hours or more, because a night without the watch is unknown rather than awake |
 | `menstruation`, `cycle_day`, `cycle_phase` | a logged period day; days since the latest period began; and the phase (`menstrual`, `follicular`, `ovulatory`, `luteal`) estimated only from periods that have already begun |
+| `hr_zone` | the zone, 0 to 5, of `heartrate` on the person's heart-rate reserve (Karvonen: zone 1 from 50 per cent of the way from resting to maximum, zone 5 from 90), with `--resting-hr` and `--max-hr` |
+| `effort_30min`, `effort_120min` | minutes in the last 30 and 120 whose heart rate reached zone 3; a hard effort keeps acting on glucose for hours after it stops |
 
 The column names `heartrate`, `steps`, `calories_burned`, `workout_label` and `workout_duration` are the
 ones the MetaboNet diabetes dataset uses, so a file in its schema gets those columns filled in place.
@@ -111,6 +115,11 @@ each: every CSV opens with a metadata line before its header; every row ends wit
 stream names are prefixes of each other (`com.samsung.shealth.exercise` and
 `com.samsung.shealth.exercise.weather`), so a glob on the stream name opens the wrong file. Stored times are
 UTC, and each record's `time_offset` gives the local wall clock, which is what CGM exports record.
+
+**Workout heart rate is not in the general heart-rate stream.** During a workout, recorded or detected by
+the watch on its own, Samsung writes the heart rate about once a second into that workout's `live_data`
+file, and the general stream (`tracker.heart_rate`) holds almost nothing for those minutes. The parser always
+reads both, so the heart rate covers exercise as well as rest.
 
 ## Configuration
 

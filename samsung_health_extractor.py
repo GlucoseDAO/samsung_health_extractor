@@ -1097,13 +1097,16 @@ def align_command(
     output: Path = typer.Argument(..., help="Where to write it with the wearable columns (.parquet or .csv)"),
     time_column: str = typer.Option("date", help="The timestamp column of SOURCE"),
     overwrite: bool = typer.Option(False, help="Replace wearable columns that already hold data"),
+    resting_hr: float = typer.Option(0.0, help="Resting heart rate for the zone columns (0: no zones)"),
+    max_hr: float = typer.Option(0.0, help="Maximum heart rate for the zone columns, e.g. 220 minus age"),
 ) -> None:
-    """Add past-only wearable columns (heart rate, steps, exercise, sleep, menstrual cycle) to a timeline."""
+    """Add past-only wearable columns (heart rate, steps, exercise, sleep, menstrual cycle, effort zones) to a timeline."""
     from samsung_health import SamsungExport, Streams, add_wearables
 
     # A CSV is read as text, so every original cell is written back exactly as it was.
     frame = pl.read_parquet(source) if source.suffix == ".parquet" else pl.read_csv(source, infer_schema_length=0)
-    joined = add_wearables(frame, time_column, Streams.read(SamsungExport.locate(export_path)), overwrite)
+    joined = add_wearables(frame, time_column, Streams.read(SamsungExport.locate(export_path)), overwrite,
+                           _zones(resting_hr, max_hr))
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.suffix == ".parquet":
         joined.write_parquet(output, statistics=True)
@@ -1120,18 +1123,31 @@ def grid_command(
     output: Path = typer.Argument(..., help="Where to write the five-minute track (.parquet or .csv)"),
     start: str = typer.Option(..., help="First timestamp, local, e.g. 2024-04-11T00:00"),
     end: str = typer.Option(..., help="Last timestamp, local"),
+    resting_hr: float = typer.Option(0.0, help="Resting heart rate for the zone columns (0: no zones)"),
+    max_hr: float = typer.Option(0.0, help="Maximum heart rate for the zone columns, e.g. 220 minus age"),
 ) -> None:
     """The wearable columns alone on a regular five-minute grid of local time."""
     from samsung_health import SamsungExport, Streams, wearable_columns
 
     times = pl.datetime_range(datetime.fromisoformat(start), datetime.fromisoformat(end), "5m",
                               time_unit="us", eager=True).alias("date")
-    frame = pl.concat([times.to_frame(), wearable_columns(times, Streams.read(SamsungExport.locate(export_path)))],
-                      how="horizontal")
+    frame = pl.concat([times.to_frame(), wearable_columns(times, Streams.read(SamsungExport.locate(export_path)),
+                                                          _zones(resting_hr, max_hr))], how="horizontal")
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.write_parquet(output, statistics=True) if output.suffix == ".parquet" else frame.write_csv(output)
     typer.echo(f"{output}: {frame.height:,d} rows")
     _coverage(frame)
+
+
+def _zones(resting_hr: float, max_hr: float):
+    """Zones from the two options, or None when neither is given; one without the other is refused."""
+    from samsung_health import Zones
+
+    if not resting_hr and not max_hr:
+        return None
+    if not (resting_hr and max_hr):
+        raise typer.BadParameter("give both --resting-hr and --max-hr for the zone columns, or neither")
+    return Zones(resting_hr, max_hr)
 
 
 def _coverage(frame: pl.DataFrame) -> None:

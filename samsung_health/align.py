@@ -32,7 +32,16 @@ Column                 What it holds at row ``t``
                        first logged period or past day 60 (a gap in logging)
 ``cycle_phase``        ``menstrual``, ``follicular``, ``ovulatory`` or ``luteal``, estimated only from
                        periods that have already begun (see :func:`cycle_columns`)
+``hr_zone``            the heart-rate zone of ``heartrate``, 0 to 5, on the person's own heart-rate
+                       reserve (:class:`Zones`); null without a heart rate or without zones
+``effort_30min``       minutes in the 30 minutes up to ``t`` whose heart rate reached zone 3; null
+                       when no heart rate was read in them or without zones
+``effort_120min``      the same over 120 minutes, because a hard effort keeps acting on glucose for
+                       hours after it stops
 =====================  ============================================================================
+
+Heart rate includes the workouts' own samples (``streams.workout_heart_rate``); without them the general
+stream holds almost none of a person's hard effort, and the zone columns would rarely fire.
 
 The sleep stages are written by Samsung after waking, so a live system would only have last night's
 stages in the morning; as a description of the past they are exact.
@@ -73,9 +82,43 @@ COLUMNS: dict[str, pl.DataType] = {
     "exercise_label": pl.String(), "exercise_minutes": pl.Float64(),
     "sleep_stage": pl.String(), "asleep": pl.Float64(),
     "menstruation": pl.Float64(), "cycle_day": pl.Float64(), "cycle_phase": pl.String(),
+    "hr_zone": pl.Float64(), "effort_30min": pl.Float64(), "effort_120min": pl.Float64(),
 }
+#: Karvonen zone floors as fractions of the heart-rate reserve: zone 1 from 50 per cent, zone 5 from 90.
+ZONE_FRACTIONS = (0.5, 0.6, 0.7, 0.8, 0.9)
+#: The zone from which effort is counted as hard.
+HARD_ZONE = 3
 #: The columns MetaboNet's schema already has; the rest are additions.
 METABONET_COLUMNS = ("heartrate", "steps", "calories_burned", "workout_label", "workout_duration")
+
+
+@dataclass(frozen=True)
+class Zones:
+    """A person's heart-rate zones, from their resting and maximum heart rate (Karvonen, on the reserve).
+
+    The resting rate is best read off sleep (a low percentile of the heart rate while asleep) and the
+    maximum, without a test, as 220 minus the person's age; both are given explicitly, so the zones never
+    depend on data from after the row they describe.
+    """
+
+    resting: float
+    maximum: float
+
+    def __post_init__(self) -> None:
+        if not 0 < self.resting < self.maximum:
+            raise ValueError(f"resting heart rate {self.resting} must lie below the maximum {self.maximum}")
+
+    @property
+    def floors(self) -> np.ndarray:
+        """The lowest heart rate of zones 1 to 5."""
+        return self.resting + np.array(ZONE_FRACTIONS) * (self.maximum - self.resting)
+
+    def zone(self, heart_rate: np.ndarray) -> np.ndarray:
+        """0 to 5 for each heart rate, NaN where it is NaN."""
+        heart_rate = np.asarray(heart_rate, dtype=float)
+        out = np.searchsorted(self.floors, heart_rate, side="right").astype(float)
+        out[~np.isfinite(heart_rate)] = np.nan
+        return out
 
 
 @dataclass(frozen=True)
@@ -101,11 +144,18 @@ class Streams:
         )
 
 
-def wearable_columns(times: pl.Series, data: Streams) -> pl.DataFrame:
-    """One row of :data:`COLUMNS` per timestamp in ``times`` (naive local datetimes, any order)."""
+def wearable_columns(times: pl.Series, data: Streams, zones: Zones | None = None) -> pl.DataFrame:
+    """One row of :data:`COLUMNS` per timestamp in ``times`` (naive local datetimes, any order).
+
+    Without ``zones`` the three zone columns are null.
+    """
     t = _ns(times)
     out: dict[str, object] = {}
     out["heartrate"] = _window_mean(t, data.heart_rate, "available", "heart_rate", HEART_RATE_WINDOW_NS)
+    empty = np.full(t.shape, np.nan)
+    out["hr_zone"] = empty if zones is None else zones.zone(out["heartrate"])
+    out["effort_30min"] = empty if zones is None else _hard_minutes(t, data.heart_rate, zones, 30 * NS_PER_MIN)
+    out["effort_120min"] = empty if zones is None else _hard_minutes(t, data.heart_rate, zones, 120 * NS_PER_MIN)
     steps, calories = _latest_bin(t, data.step_bins)
     out["steps"], out["calories_burned"] = steps, calories
     out.update(_exercise(t, data.exercise_sessions, covered=~np.isnan(steps)))
@@ -138,6 +188,27 @@ def _window_mean(t: np.ndarray, frame: pl.DataFrame, time: str, value: str, wind
     count = hi - lo
     has = count > 0
     result[has] = (cumulative[hi[has]] - cumulative[lo[has]]) / count[has]
+    return result
+
+
+def _hard_minutes(t: np.ndarray, frame: pl.DataFrame, zones: Zones, window: int) -> np.ndarray:
+    """Minutes in ``(t - window, t]`` whose heart rate reached zone 3, NaN where no heart rate was read in them.
+
+    Each reading belongs to the minute holding it, and a minute counts once it is complete; a minute is hard
+    when its highest reading is at zone 3 or above.
+    """
+    result = np.full(t.shape, np.nan)
+    if frame.is_empty():
+        return result
+    at = _ns(frame["available"])
+    minutes = (pl.DataFrame({"m": (at - 1) // NS_PER_MIN, "v": frame["heart_rate"].to_numpy()})
+               .group_by("m").agg(pl.col("v").max()).sort("m"))
+    end = (minutes["m"].to_numpy() + 1) * NS_PER_MIN
+    hard = np.concatenate([[0], np.cumsum(minutes["v"].to_numpy() >= zones.floors[HARD_ZONE - 1])])
+    lo = np.searchsorted(end, t - window, side="right")
+    hi = np.searchsorted(end, t, side="right")
+    seen = hi > lo
+    result[seen] = (hard[hi] - hard[lo])[seen]
     return result
 
 
@@ -299,7 +370,8 @@ def cycle_columns(times: pl.Series, days: pl.DataFrame) -> dict[str, object]:
     return {"menstruation": menstruation, "cycle_day": cycle_day, "cycle_phase": phase}
 
 
-def add_wearables(frame: pl.DataFrame, time_column: str, data: Streams, overwrite: bool = False) -> pl.DataFrame:
+def add_wearables(frame: pl.DataFrame, time_column: str, data: Streams, overwrite: bool = False,
+                  zones: Zones | None = None) -> pl.DataFrame:
     """``frame`` with the wearable columns filled in place where it has them, appended where it does not.
 
     A column the frame already holds must be empty (all null), as MetaboNet's wearable columns are for a
@@ -309,7 +381,7 @@ def add_wearables(frame: pl.DataFrame, time_column: str, data: Streams, overwrit
     times = frame[time_column]
     if times.dtype == pl.String:
         times = times.str.to_datetime(strict=False)
-    block = wearable_columns(times, data)
+    block = wearable_columns(times, data, zones)
     for name in block.columns:
         if name in frame.columns and frame[name].null_count() < frame.height and not overwrite:
             raise ValueError(f"column {name!r} already holds data; pass overwrite=True to replace it")

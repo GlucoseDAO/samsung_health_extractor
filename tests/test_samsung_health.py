@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+
+import numpy as np
 from pathlib import Path
 
 import polars as pl
@@ -27,7 +29,7 @@ def test_exact_stream_match_and_prefixes(export_dir: Path) -> None:
 
 
 def test_heart_rate_minutes_replace_the_summary(export_dir: Path) -> None:
-    hr = streams.heart_rate(SamsungExport(export_dir))
+    hr = streams.heart_rate(SamsungExport(export_dir)).filter(pl.col("kind") != "workout")
     assert 999.0 not in hr["heart_rate"].to_list()
     assert hr["available"].to_list() == [datetime(2026, 7, 1, 8, 0, 30), datetime(2026, 7, 1, 9, 1),
                                          datetime(2026, 7, 1, 9, 2), datetime(2026, 7, 1, 9, 3)]
@@ -103,3 +105,32 @@ def test_local_time_uses_each_records_offset(export_dir: Path) -> None:
     sessions = streams.exercise_sessions(SamsungExport(export_dir))
     assert sessions["start"][0] == datetime(2026, 7, 1, 10, 2)
     assert sessions["end"][0] - sessions["start"][0] == timedelta(minutes=20)
+
+
+def test_workout_heart_rate_becomes_minute_bins_in_the_stream(export_dir: Path) -> None:
+    export = SamsungExport(export_dir)
+    bins = streams.workout_heart_rate(export)
+    assert bins.height == 17 and set(bins["kind"]) == {"workout"}
+    assert bins["available"][0] == datetime(2026, 7, 1, 10, 6) and bins["heart_rate"][0] == 150.0
+    assert bins["available"][-1] == datetime(2026, 7, 1, 10, 22) and bins["heart_rate"][-1] == 110.0
+    every = streams.heart_rate(export)  # workout heart rate is always part of the stream
+    assert (every["kind"] == "workout").sum() == 17
+
+
+def test_zones_and_minutes_of_hard_effort_read_only_the_past(export_dir: Path) -> None:
+    from samsung_health import Zones
+
+    zones = Zones(60, 180)  # zone floors 120, 132, 144, 156, 168: 150 is zone 3, 110 is zone 0
+    assert list(zones.floors) == [120, 132, 144, 156, 168] and zones.zone(np.array([150.0]))[0] == 3
+    data = Streams.read(SamsungExport(export_dir))
+    times = [datetime(2026, 7, 1, 10, 5), datetime(2026, 7, 1, 10, 10), datetime(2026, 7, 1, 10, 15),
+             datetime(2026, 7, 1, 10, 25), datetime(2026, 7, 1, 12, 0), datetime(2026, 7, 1, 12, 20)]
+    frame = wearable_columns(at(*times), data, zones)
+    # The minutes ending 10:06 to 10:15 are hard; a minute counts once complete, so 10:10 holds five of them.
+    assert frame["effort_30min"].to_list() == [None, 5.0, 10.0, 10.0, None, None]
+    # At 12:20 the two hours hold only the easy minutes ending 10:21 and 10:22: read, and none of them hard.
+    assert frame["effort_120min"].to_list() == [0.0, 5.0, 10.0, 10.0, 10.0, 0.0]  # 10:05 sees the 9:01-9:03 minutes
+    assert frame["hr_zone"].to_list()[:4] == [None, 3.0, 3.0, 0.0]
+    assert wearable_columns(at(*times), data)["hr_zone"].null_count() == len(times)  # no zones, no zone columns
+    with pytest.raises(ValueError):
+        Zones(180, 60)
