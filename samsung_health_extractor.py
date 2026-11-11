@@ -1118,6 +1118,25 @@ def vitals_command(
         typer.echo(f"{name:20s} {frame.height:>9,d} rows{span}")
 
 
+@app.command("body")
+def body_command(
+    export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),
+    out_dir: Path = typer.Argument(..., help="Where to write one parquet per table"),
+) -> None:
+    """Write weighings (with the scale's body composition and BMI), heights and blood pressure readings to
+    parquet, in local time."""
+    from samsung_health import SamsungExport, body
+
+    export = SamsungExport.locate(export_path)
+    tables = {"weight": body.weight(export), "height": body.height(export),
+              "blood_pressure": body.blood_pressure(export)}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, frame in tables.items():
+        frame.write_parquet(out_dir / f"{name}.parquet")
+        span = f"  {frame['start'].min()} .. {frame['start'].max()}" if frame.height else ""
+        typer.echo(f"{name:20s} {frame.height:>9,d} rows{span}")
+
+
 @app.command("align")
 def align_command(
     export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),

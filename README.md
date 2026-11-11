@@ -143,6 +143,22 @@ length within a few per cent, the nightly RMSSD from them agrees with Samsung's 
 the resting heart rate with the RR-derived lowest 5-minute rate within about 2 bpm. Only the last week or so of
 nights keeps its RR intervals. An export holds no PPG waveform.
 
+## Body: weight and body composition, height, blood pressure
+
+```bash
+uv run samsung-health body "./Samsung Health" ./body
+```
+
+| Table | What it holds |
+|---|---|
+| `weight` | every weighing: `weight_kg`; from a smart scale also `body_fat_pct`, `body_fat_mass_kg`, `skeletal_muscle_mass_kg`, `fat_free_mass_kg`, `total_body_water_kg`, `basal_metabolic_rate_kcal` (bioimpedance estimates; null for a manual entry); `height_cm` and `bmi` |
+| `height` | every height entered, `height_cm` |
+| `blood_pressure` | every cuff reading: `systolic`, `diastolic`, `mean`, `pulse` |
+
+BMI uses the latest height entered at or before the weighing, or the first height when every height came later.
+Exact duplicate weighings are kept once; weights outside 20-400 kg and heights outside 100-250 cm are dropped
+as entry errors.
+
 ## Configuration
 
 ### Ignore List (`ignore_csvs.txt`)
