@@ -1090,6 +1090,34 @@ def streams_command(
         typer.echo(f"{name:20s} {frame.height:>9,d} rows{span}")
 
 
+@app.command("vitals")
+def vitals_command(
+    export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),
+    out_dir: Path = typer.Argument(..., help="Where to write one parquet per table"),
+) -> None:
+    """Write HRV, RR intervals in sleep, SpO2, skin temperature, respiratory rate, stress, ECG recordings, and
+    nightly HRV (from RR) and resting heart rate, to parquet, in local time."""
+    from samsung_health import SamsungExport, vitals
+    from samsung_health.streams import heart_rate, sleep_sessions
+
+    export = SamsungExport.locate(export_path)
+    rr = vitals.sleep_rr(export)
+    tables = {
+        "hrv_bins": vitals.hrv_bins(export), "sleep_rr": rr, "night_hrv": vitals.night_hrv(rr),
+        "resting_heart_rate": vitals.resting_heart_rate(heart_rate(export), sleep_sessions(export)),
+        "spo2_raw": vitals.spo2_raw(export), "skin_temperature": vitals.skin_temperature(export),
+        "respiratory_rate": vitals.respiratory_rate(export), "stress": vitals.stress(export), "ecg": vitals.ecg(export),
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, frame in tables.items():
+        frame.write_parquet(out_dir / f"{name}.parquet")
+        span = ""
+        time = next((c for c in ("start", "beat") if c in frame.columns), None)
+        if time and frame.height:
+            span = f"  {frame[time].min()} .. {frame[time].max()}"
+        typer.echo(f"{name:20s} {frame.height:>9,d} rows{span}")
+
+
 @app.command("align")
 def align_command(
     export_path: Path = typer.Argument(..., help="The export folder, or a folder holding exactly one"),

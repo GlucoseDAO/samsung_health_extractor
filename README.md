@@ -121,6 +121,28 @@ the watch on its own, Samsung writes the heart rate about once a second into tha
 file, and the general stream (`tracker.heart_rate`) holds almost nothing for those minutes. The parser always
 reads both, so the heart rate covers exercise as well as rest.
 
+## Vitals: HRV, RR intervals in sleep, SpO2, skin temperature, respiratory rate, stress, ECG
+
+```bash
+# One parquet per table, every time in local wall-clock time
+uv run samsung-health vitals "./Samsung Health" ./vitals
+```
+
+| Table | What it holds |
+|---|---|
+| `hrv_bins` | Samsung's own SDNN and RMSSD per 30 s bin (its algorithm) |
+| `sleep_rr` | **per-beat RR intervals in sleep** (`sleep_raw_data`): `beat` time, 30 s `epoch`, `rr_ms`, `confidence` |
+| `night_hrv` | per sleep, from `sleep_rr`: RMSSD and SDNN per 5 min of normal beats, their median, mean and lowest heart rate |
+| `resting_heart_rate` | per sleep of 3 h or more: the lowest 5-minute mean of the heart-rate stream |
+| `spo2_raw`, `skin_temperature`, `respiratory_rate`, `stress` | the watch's binned values |
+| `ecg` | the ECG app's 30 s recordings (500 Hz samples) with the app's own mean heart rate and classification |
+
+`sleep_raw_data` keeps one payload per sleep: 30 s epochs from the sleep's start, each with `rri_info` triples
+`[flag, confidence 1-255, RR in ms]`. On two real exports the RR intervals of a night add up to the sleep's
+length within a few per cent, the nightly RMSSD from them agrees with Samsung's own bins at r 0.97-0.98, and
+the resting heart rate with the RR-derived lowest 5-minute rate within about 2 bpm. Only the last week or so of
+nights keeps its RR intervals. An export holds no PPG waveform.
+
 ## Configuration
 
 ### Ignore List (`ignore_csvs.txt`)
